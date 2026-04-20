@@ -49,9 +49,9 @@ else
   die "brew not found on PATH after install"
 fi
 
-# ---- step 3: minimum tools to clone the repo ----------------------------
-log "Installing git, gh, 1Password…"
-brew install git gh
+# ---- step 3: minimum tools to clone the repo + pretty bootstrap UI -----
+log "Installing git, gh, gum, 1Password…"
+brew install git gh gum
 brew install --cask 1password 1password-cli || \
   warn "1Password cask install skipped or already present"
 
