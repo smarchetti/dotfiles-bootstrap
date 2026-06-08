@@ -75,8 +75,8 @@ prereqs_macos() {
   else die "brew not found on PATH after install"
   fi
 
-  log "Installing git, gh…"
-  brew install git gh
+  log "Installing git, gh, chezmoi…"
+  brew install git gh chezmoi
 }
 
 # ── prerequisites: Debian/Ubuntu ──────────────────────────────────────────────
@@ -98,6 +98,12 @@ prereqs_debian() {
       | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
     sudo apt-get update -qq
     sudo apt-get install -y -qq gh
+  fi
+
+  if ! have chezmoi; then
+    log "Installing chezmoi…"
+    sh -c "$(curl -fsLS get.chezmoi.io)" -- -b "$HOME/.local/bin"
+    export PATH="$HOME/.local/bin:$PATH"
   fi
 }
 
@@ -132,9 +138,9 @@ else
   log "Dotfiles already cloned at $DOTFILES_DIR"
 fi
 
-# ── hand off to the private bootstrap ─────────────────────────────────────────
-cd "$DOTFILES_DIR"
-[[ -x ./bootstrap.sh ]] || die "bootstrap.sh not found or not executable in $DOTFILES_DIR"
-
-log "Handing off to $DOTFILES_DIR/bootstrap.sh…"
-exec ./bootstrap.sh "$@"
+# ── apply with chezmoi ────────────────────────────────────────────────────────
+# The dotfiles repo is a chezmoi source tree under home/. `init --apply` prompts
+# for profile/identity (see home/.chezmoi.toml.tmpl), then renders + installs
+# everything (configs, packages, launchd, macOS defaults) via chezmoi.
+log "Applying dotfiles with chezmoi (it will prompt for profile + identity)…"
+exec chezmoi init --apply --source "$DOTFILES_DIR/home" "$@"
