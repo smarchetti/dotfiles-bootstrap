@@ -28,10 +28,23 @@ DOTFILES_DIR="${DOTFILES_DIR:-$HOME/Development/smarchetti/dotfiles}"
 MIN_MACOS_MAJOR=14
 
 # ── helpers ─────────────────────────────────────────────────────────────────
-log()  { printf '\033[1;34m[init]\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31m[fail]\033[0m %s\n' "$*" >&2; exit 1; }
-have() { command -v "$1" &>/dev/null; }
+# Visual vocabulary mirrors the dotfiles' scripts/lib.sh so this cold-start stub
+# and the bootstrap.sh it hands off to read as one program. Colors auto-disable
+# when stderr isn't a TTY. All diagnostics go to stderr; ask() keeps stdout clean
+# for command substitution.
+if [[ -t 2 ]]; then
+  BLUE=$'\033[34m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'
+  BOLD=$'\033[1m'; RESET=$'\033[0m'
+else
+  BLUE=""; GREEN=""; YELLOW=""; RED=""; BOLD=""; RESET=""
+fi
+header() { printf '\n%s━━ %s ━━%s\n' "$BOLD"  "$*" "$RESET" >&2; }
+log()    { printf '%s•%s %s\n'        "$BLUE"   "$RESET" "$*" >&2; }
+step()   { printf '  %s\n'            "$*"                    >&2; }
+ok()     { printf '%s✓%s %s\n'        "$GREEN"  "$RESET" "$*" >&2; }
+warn()   { printf '%s!%s %s\n'        "$YELLOW" "$RESET" "$*" >&2; }
+die()    { printf '%s✗%s %s\n'        "$RED"    "$RESET" "$*" >&2; exit 1; }
+have()   { command -v "$1" &>/dev/null; }
 
 # ask <prompt> <default> -> echoes the answer
 ask() {
@@ -54,6 +67,9 @@ esac
 
 # ── prerequisites: macOS ────────────────────────────────────────────────────
 prereqs_macos() {
+  header "Prerequisites · macOS"
+  # Quiet Homebrew: no auto-update churn, no post-install env hints.
+  export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1
   local major
   major="$(sw_vers -productVersion | cut -d. -f1)"
   (( major >= MIN_MACOS_MAJOR )) || die "macOS ${MIN_MACOS_MAJOR}+ required (found ${major})"
@@ -75,17 +91,36 @@ prereqs_macos() {
   else die "brew not found on PATH after install"
   fi
 
-  log "Installing git, gh…"
-  brew install git gh
+  # Only install what's missing — avoids brew's "already installed" warnings.
+  local pkgs=() p
+  for p in git gh; do have "$p" || pkgs+=("$p"); done
+  if (( ${#pkgs[@]} )); then
+    log "Installing ${pkgs[*]} via Homebrew…"
+    brew install "${pkgs[@]}"
+  else
+    step "git, gh already present"
+  fi
 }
 
 # ── prerequisites: Debian/Ubuntu ──────────────────────────────────────────────
 prereqs_debian() {
+  header "Prerequisites · Debian"
   have sudo || die "sudo is required on Debian/Ubuntu"
 
-  log "Installing base tools via apt…"
-  sudo apt-get update -qq
-  sudo apt-get install -y -qq git curl ca-certificates
+  # Only run apt (and its network update) for tools that aren't already present.
+  # dpkg-query catches ca-certificates, which has no binary for `have` to find.
+  local need=() p
+  for p in git curl ca-certificates; do
+    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' \
+      || need+=("$p")
+  done
+  if (( ${#need[@]} )); then
+    log "Installing ${need[*]} via apt…"
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq "${need[@]}"
+  else
+    step "base tools already present"
+  fi
 
   # GitHub CLI — add the official apt repo if gh isn't already present.
   if ! have gh; then
@@ -110,15 +145,19 @@ esac
 # Works the same headless or with a GUI: gh prints a one-time code; open the
 # URL on any device, sign in (1Password), enter the code. This also sets up the
 # git credential helper, so later HTTPS git operations stay authenticated.
-if ! gh auth status &>/dev/null; then
+header "GitHub"
+if gh auth status &>/dev/null; then
+  step "Already authenticated"
+else
   log "Authenticating with GitHub…"
-  log "  → gh will show a one-time code. Open the shown URL on any device"
-  log "    (e.g. your phone), sign in with 1Password, and enter the code."
+  step "→ gh will show a one-time code. Open the shown URL on any device"
+  step "  (e.g. your phone), sign in with 1Password, and enter the code."
   gh auth login --hostname github.com --git-protocol https --web
 fi
 gh auth status &>/dev/null || die "GitHub authentication did not complete"
 
 # ── ask where things go (skipped if pinned via env) ──────────────────────────
+header "Dotfiles"
 [[ -n "$_REPO_FROM_ENV" ]] || DOTFILES_REPO="$(ask 'GitHub repo to clone:' "$DOTFILES_REPO")"
 [[ -n "$_DIR_FROM_ENV"  ]] || DOTFILES_DIR="$(ask 'Clone dotfiles to:'     "$DOTFILES_DIR")"
 DOTFILES_DIR="${DOTFILES_DIR/#\~/$HOME}"   # expand a leading ~
@@ -129,7 +168,7 @@ if [[ ! -d "$DOTFILES_DIR/.git" ]]; then
   mkdir -p "$(dirname "$DOTFILES_DIR")"
   gh repo clone "$DOTFILES_REPO" "$DOTFILES_DIR"
 else
-  log "Dotfiles already cloned at $DOTFILES_DIR"
+  step "Already cloned at $DOTFILES_DIR"
 fi
 
 # ── hand off to the private bootstrap ─────────────────────────────────────────
