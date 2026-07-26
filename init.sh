@@ -75,9 +75,29 @@ prereqs_macos() {
   (( major >= MIN_MACOS_MAJOR )) || die "macOS ${MIN_MACOS_MAJOR}+ required (found ${major})"
 
   if ! xcode-select -p &>/dev/null; then
-    log "Installing Xcode Command Line Tools (a GUI prompt will appear)…"
-    xcode-select --install || true
-    read -rp "Press Enter once the CLT install completes… "
+    if [[ -n "${SSH_CONNECTION:-}" ]]; then
+      # Headless: xcode-select --install pops a GUI dialog on a display nobody
+      # is looking at. The trigger file makes softwareupdate list CLT packages;
+      # install the newest (labels sort by version) over ssh instead.
+      log "Installing Xcode Command Line Tools headless (via softwareupdate)…"
+      local clt_trigger=/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+      touch "$clt_trigger"
+      local clt_label
+      clt_label="$(softwareupdate -l 2>/dev/null \
+        | sed -n 's/^\* Label: \(Command Line Tools for Xcode.*\)/\1/p' | sort -V | tail -1)"
+      [[ -n "$clt_label" ]] || { rm -f "$clt_trigger"; die "no CLT package found via softwareupdate"; }
+      step "package: $clt_label (sudo will prompt)"
+      sudo softwareupdate -i "$clt_label" --verbose || { rm -f "$clt_trigger"; die "CLT install failed"; }
+      rm -f "$clt_trigger"
+    else
+      log "Installing Xcode Command Line Tools (a GUI prompt will appear)…"
+      xcode-select --install || true
+      read -rp "Press Enter once the CLT install completes… "
+    fi
+    # softwareupdate installs don't always set the active developer dir
+    if ! xcode-select -p &>/dev/null && [[ -d /Library/Developer/CommandLineTools ]]; then
+      sudo xcode-select --switch /Library/Developer/CommandLineTools
+    fi
     xcode-select -p &>/dev/null || die "CLT install did not complete"
   fi
 
