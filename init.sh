@@ -2,36 +2,40 @@
 #
 # Public cold-start bootstrap for Sean Marchetti's dotfiles.
 #
-# Run on a fresh macOS or Debian/Ubuntu machine:
+# Run on a fresh Mac:
 #
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/smarchetti/dotfiles-bootstrap/main/init.sh)"
 #
-# Forward args to the dotfiles bootstrap.sh (e.g. pick a profile, skip confirm):
+# Pick the mise profile instead of detecting it from the hostname:
 #
-#   bash -c "$(curl -fsSL .../init.sh)" -- work -y
+#   bash -c "$(curl -fsSL .../init.sh)" -- personal
 #
 # Must be run via `bash -c "$(curl …)"` (not `curl … | bash`) so the shell
-# keeps the terminal as stdin and every prompt — GitHub login, the path
-# questions, and bootstrap.sh's profile picker — works.
+# keeps the terminal as stdin and every prompt (sudo, GitHub login, ssh-keygen
+# passphrases) works.
 #
-# What it does: installs the minimum tools to clone the private dotfiles repo,
-# authenticates GitHub via device-code flow (approve on your phone), clones the
-# repo, then hands off to its bootstrap.sh.
+# What it does: installs the Command Line Tools and mise, authenticates GitHub
+# via device-code flow (approve on your phone), adopts the private dotfiles repo
+# with `mise bootstrap --adopt`, applies the machine's profile, then sets up
+# what stays on the machine (SSH keys, signing, the repos Claude Code needs).
+# Every step checks first, so rerunning it after a failure is safe.
 #
 set -euo pipefail
 
-# ── config — env vars pin a value and skip its prompt ───────────────────────
-_REPO_FROM_ENV="${DOTFILES_REPO+yes}"
-_DIR_FROM_ENV="${DOTFILES_DIR+yes}"
-DOTFILES_REPO="${DOTFILES_REPO:-smarchetti/dotfiles}"
-DOTFILES_DIR="${DOTFILES_DIR:-$HOME/Development/smarchetti/dotfiles}"
+# ── config: env vars override ───────────────────────────────────────────────
+DOTFILES_URL="${DOTFILES_URL:-https://github.com/smarchetti/dotfiles.git}"
+DOTFILES_PROFILE="${1:-${DOTFILES_PROFILE:-}}"
+GIT_NAME="${GIT_NAME:-Sean Marchetti}"
+GIT_EMAIL="${GIT_EMAIL:-sean.marchetti@gmail.com}"
+CODE_REPOS=(smarchetti/skills smarchetti/claude-hud)   # cloned to ~/Code/<owner>/<repo>
+MIN_MISE=2026.10.0   # first release that installs tapped casks (Orca)
 MIN_MACOS_MAJOR=14
+GH_SCOPES=admin:public_key,admin:ssh_signing_key       # for `gh ssh-key add`
+
+MISE="$HOME/.local/bin/mise"
+MISE_DIR="$HOME/.config/mise"
 
 # ── helpers ─────────────────────────────────────────────────────────────────
-# Visual vocabulary mirrors the dotfiles' scripts/lib.sh so this cold-start stub
-# and the bootstrap.sh it hands off to read as one program. Colors auto-disable
-# when stderr isn't a TTY. All diagnostics go to stderr; ask() keeps stdout clean
-# for command substitution.
 if [[ -t 2 ]]; then
   BLUE=$'\033[34m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'
   BOLD=$'\033[1m'; RESET=$'\033[0m'
@@ -44,156 +48,178 @@ step()   { printf '  %s\n'            "$*"                    >&2; }
 ok()     { printf '%s✓%s %s\n'        "$GREEN"  "$RESET" "$*" >&2; }
 warn()   { printf '%s!%s %s\n'        "$YELLOW" "$RESET" "$*" >&2; }
 die()    { printf '%s✗%s %s\n'        "$RED"    "$RESET" "$*" >&2; exit 1; }
-have()   { command -v "$1" &>/dev/null; }
+pause()  { read -rp "  $* Press Enter to continue… " _ || true; }
 
-# ask <prompt> <default> -> echoes the answer
-ask() {
-  local prompt="$1" default="$2" ans
-  read -rp "$prompt [$default]: " ans || ans=""
-  printf '%s' "${ans:-$default}"
+# Before bootstrap there is no gh on PATH; mise runs one. Afterwards use
+# Homebrew's, which the repo's git credential helper points at.
+gh() {
+  if [[ -x /opt/homebrew/bin/gh ]]; then /opt/homebrew/bin/gh "$@"
+  else "$MISE" exec gh@latest -- gh "$@"
+  fi
 }
 
-# ── detect OS ───────────────────────────────────────────────────────────────
-OS=""
-case "$(uname -s)" in
-  Darwin) OS=macos ;;
-  Linux)
-    if [[ -f /etc/debian_version ]] || grep -qiE 'debian|ubuntu' /etc/os-release 2>/dev/null; then
-      OS=debian
-    fi
-    ;;
-esac
-[[ -n "$OS" ]] || die "Unsupported OS — this bootstrap handles macOS and Debian/Ubuntu."
+[[ "$(uname -s)" == Darwin ]] || die "This bootstrap is macOS only."
+(( "$(sw_vers -productVersion | cut -d. -f1)" >= MIN_MACOS_MAJOR )) \
+  || die "macOS ${MIN_MACOS_MAJOR}+ required"
 
-# ── prerequisites: macOS ────────────────────────────────────────────────────
-prereqs_macos() {
-  header "Prerequisites · macOS"
-  # Quiet Homebrew: no auto-update churn, no post-install env hints.
-  export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1
-  local major
-  major="$(sw_vers -productVersion | cut -d. -f1)"
-  (( major >= MIN_MACOS_MAJOR )) || die "macOS ${MIN_MACOS_MAJOR}+ required (found ${major})"
+# ── sudo, once ──────────────────────────────────────────────────────────────
+# The CLT install and Homebrew's NONINTERACTIVE installer both need sudo; the
+# latter fails rather than prompting, so cache credentials now and keep them warm.
+header "sudo"
+sudo -v || die "sudo is required (use an administrator account)"
+while kill -0 "$$" 2>/dev/null; do sudo -n true; sleep 50; done 2>/dev/null &
 
-  if ! xcode-select -p &>/dev/null; then
-    if [[ -n "${SSH_CONNECTION:-}" ]]; then
-      # Headless: xcode-select --install pops a GUI dialog on a display nobody
-      # is looking at. The trigger file makes softwareupdate list CLT packages;
-      # install the newest (labels sort by version) over ssh instead.
-      log "Installing Xcode Command Line Tools headless (via softwareupdate)…"
-      local clt_trigger=/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
-      touch "$clt_trigger"
-      local clt_label
-      clt_label="$(softwareupdate -l 2>/dev/null \
-        | sed -n 's/^\* Label: \(Command Line Tools for Xcode.*\)/\1/p' | sort -V | tail -1)"
-      [[ -n "$clt_label" ]] || { rm -f "$clt_trigger"; die "no CLT package found via softwareupdate"; }
-      step "package: $clt_label (sudo will prompt)"
-      sudo softwareupdate -i "$clt_label" --verbose || { rm -f "$clt_trigger"; die "CLT install failed"; }
-      rm -f "$clt_trigger"
-    else
-      log "Installing Xcode Command Line Tools (a GUI prompt will appear)…"
-      xcode-select --install || true
-      read -rp "Press Enter once the CLT install completes… "
-    fi
-    # softwareupdate installs don't always set the active developer dir
-    if ! xcode-select -p &>/dev/null && [[ -d /Library/Developer/CommandLineTools ]]; then
-      sudo xcode-select --switch /Library/Developer/CommandLineTools
-    fi
-    xcode-select -p &>/dev/null || die "CLT install did not complete"
-  fi
-
-  if ! have brew; then
-    log "Installing Homebrew…"
-    NONINTERACTIVE=1 /bin/bash -c \
-      "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  fi
-  if   [[ -x /opt/homebrew/bin/brew ]]; then eval "$(/opt/homebrew/bin/brew shellenv)"
-  elif [[ -x /usr/local/bin/brew   ]]; then eval "$(/usr/local/bin/brew shellenv)"
-  else die "brew not found on PATH after install"
-  fi
-
-  # Only install what's missing — avoids brew's "already installed" warnings.
-  local pkgs=() p
-  for p in git gh; do have "$p" || pkgs+=("$p"); done
-  if (( ${#pkgs[@]} )); then
-    log "Installing ${pkgs[*]} via Homebrew…"
-    brew install "${pkgs[@]}"
+# ── Command Line Tools ──────────────────────────────────────────────────────
+header "Command Line Tools"
+if xcode-select -p &>/dev/null; then
+  step "Already installed"
+else
+  # The trigger file makes softwareupdate list the CLT package, so it installs
+  # without the GUI dialog (and works over ssh). Labels sort by version.
+  clt_trigger=/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+  touch "$clt_trigger"
+  clt_label="$(softwareupdate -l 2>/dev/null \
+    | sed -n 's/^\* Label: \(Command Line Tools for Xcode.*\)/\1/p' | sort -V | tail -1)"
+  if [[ -n "$clt_label" ]]; then
+    log "Installing $clt_label…"
+    sudo softwareupdate -i "$clt_label" || { rm -f "$clt_trigger"; die "CLT install failed"; }
+    rm -f "$clt_trigger"
   else
-    step "git, gh already present"
+    rm -f "$clt_trigger"
+    warn "softwareupdate did not offer the CLT; falling back to the installer dialog"
+    xcode-select --install || true
+    pause "Finish the Command Line Tools install."
   fi
-}
-
-# ── prerequisites: Debian/Ubuntu ──────────────────────────────────────────────
-prereqs_debian() {
-  header "Prerequisites · Debian"
-  have sudo || die "sudo is required on Debian/Ubuntu"
-
-  # Only run apt (and its network update) for tools that aren't already present.
-  # dpkg-query catches ca-certificates, which has no binary for `have` to find.
-  local need=() p
-  for p in git curl ca-certificates; do
-    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' \
-      || need+=("$p")
-  done
-  if (( ${#need[@]} )); then
-    log "Installing ${need[*]} via apt…"
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq "${need[@]}"
-  else
-    step "base tools already present"
+  if ! xcode-select -p &>/dev/null && [[ -d /Library/Developer/CommandLineTools ]]; then
+    sudo xcode-select --switch /Library/Developer/CommandLineTools
   fi
+  xcode-select -p &>/dev/null || die "CLT install did not complete"
+  ok "Installed"
+fi
 
-  # GitHub CLI — add the official apt repo if gh isn't already present.
-  if ! have gh; then
-    log "Adding the GitHub CLI apt repo…"
-    sudo install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-      | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null
-    sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-      | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq gh
-  fi
-}
+# ── mise ────────────────────────────────────────────────────────────────────
+header "mise"
+if [[ ! -x "$MISE" ]]; then
+  log "Installing mise…"
+  mise_installer="$(mktemp)"
+  curl -fsSL https://mise.run -o "$mise_installer" || { rm -f "$mise_installer"; die "mise download failed"; }
+  sh "$mise_installer"
+  rm -f "$mise_installer"
+fi
+mise_version="$("$MISE" --version | awk '{print $1}')"
+if [[ "$(printf '%s\n%s\n' "$MIN_MISE" "$mise_version" | sort -V | head -1)" != "$MIN_MISE" ]]; then
+  log "Updating mise $mise_version (need $MIN_MISE+)…"
+  "$MISE" self-update -y
+fi
+ok "$("$MISE" --version | awk '{print $1}')"
 
-case "$OS" in
-  macos)  prereqs_macos ;;
-  debian) prereqs_debian ;;
-esac
-
-# ── GitHub auth — device-code flow (approve on your phone) ───────────────────
-# Works the same headless or with a GUI: gh prints a one-time code; open the
-# URL on any device, sign in (1Password), enter the code. This also sets up the
-# git credential helper, so later HTTPS git operations stay authenticated.
+# ── GitHub ──────────────────────────────────────────────────────────────────
+# Device-code flow: gh prints a one-time code; open the URL on any device and
+# enter it. The ssh-key scopes are requested now so step 7 needs no second login.
 header "GitHub"
-if gh auth status &>/dev/null; then
+if gh auth status --hostname github.com &>/dev/null; then
   step "Already authenticated"
+  scopes="$(gh api -i user 2>/dev/null | tr -d '\r' | sed -n 's/^[Xx]-[Oo][Aa]uth-[Ss]copes: //p')"
+  if [[ "$scopes" != *admin:public_key* || "$scopes" != *admin:ssh_signing_key* ]]; then
+    log "Adding the ssh-key scopes…"
+    gh auth refresh --hostname github.com --scopes "$GH_SCOPES"
+  fi
 else
   log "Authenticating with GitHub…"
-  step "→ gh will show a one-time code. Open the shown URL on any device"
-  step "  (e.g. your phone), sign in with 1Password, and enter the code."
-  gh auth login --hostname github.com --git-protocol https --web
+  step "→ gh will show a one-time code. Open the URL on any device and enter it."
+  gh auth login --hostname github.com --git-protocol https --web --scopes "$GH_SCOPES"
 fi
-gh auth status &>/dev/null || die "GitHub authentication did not complete"
+gh auth status --hostname github.com &>/dev/null || die "GitHub authentication did not complete"
+gh auth setup-git --hostname github.com
+git ls-remote "$DOTFILES_URL" HEAD &>/dev/null || die "This account cannot read $DOTFILES_URL"
+ok "Authenticated"
 
-# ── ask where things go (skipped if pinned via env) ──────────────────────────
+# ── dotfiles ────────────────────────────────────────────────────────────────
 header "Dotfiles"
-[[ -n "$_REPO_FROM_ENV" ]] || DOTFILES_REPO="$(ask 'GitHub repo to clone:' "$DOTFILES_REPO")"
-[[ -n "$_DIR_FROM_ENV"  ]] || DOTFILES_DIR="$(ask 'Clone dotfiles to:'     "$DOTFILES_DIR")"
-DOTFILES_DIR="${DOTFILES_DIR/#\~/$HOME}"   # expand a leading ~
-
-# ── clone ─────────────────────────────────────────────────────────────────────
-if [[ ! -d "$DOTFILES_DIR/.git" ]]; then
-  log "Cloning $DOTFILES_REPO → $DOTFILES_DIR"
-  mkdir -p "$(dirname "$DOTFILES_DIR")"
-  gh repo clone "$DOTFILES_REPO" "$DOTFILES_DIR"
+if [[ -d "$MISE_DIR/.git" ]]; then
+  step "Already cloned at $MISE_DIR"
 else
-  step "Already cloned at $DOTFILES_DIR"
+  # gh login writes its own config.yml; bootstrap links the repo's in its place.
+  gh_config="$HOME/.config/gh/config.yml"
+  if [[ -f "$gh_config" && ! -L "$gh_config" ]]; then
+    gh_backup="$(mktemp "$gh_config.before-dotfiles.XXXXXX")"
+    mv "$gh_config" "$gh_backup"
+    step "Saved GitHub CLI preferences to $gh_backup"
+  fi
+  # --adopt clones into ~/.config/mise and applies config.toml. It ignores -E,
+  # so the profile is a second pass below.
+  log "Adopting $DOTFILES_URL…"
+  "$MISE" bootstrap --adopt "$DOTFILES_URL"
 fi
 
-# ── hand off to the private bootstrap ─────────────────────────────────────────
-cd "$DOTFILES_DIR"
-[[ -x ./bootstrap.sh ]] || die "bootstrap.sh not found or not executable in $DOTFILES_DIR"
+# ── profile ─────────────────────────────────────────────────────────────────
+# A machine with its own config.<LocalHostName>.toml uses that profile; any
+# other Mac is the personal MacBook.
+if [[ -z "$DOTFILES_PROFILE" ]]; then
+  host="$(scutil --get LocalHostName)"
+  if [[ -f "$MISE_DIR/config.$host.toml" ]]; then DOTFILES_PROFILE="$host"
+  else DOTFILES_PROFILE=personal
+  fi
+fi
+[[ -f "$MISE_DIR/config.$DOTFILES_PROFILE.toml" ]] \
+  || die "No config.$DOTFILES_PROFILE.toml in $MISE_DIR"
+header "Profile · $DOTFILES_PROFILE"
 
-log "Handing off to $DOTFILES_DIR/bootstrap.sh…"
-exec ./bootstrap.sh "$@"
+if grep -q '^[^#]*"mas:' "$MISE_DIR/config.$DOTFILES_PROFILE.toml"; then
+  log "This profile installs App Store apps; Apple has no CLI sign-in."
+  open -a "App Store" || true
+  pause "Sign in to the App Store (skip if already signed in)."
+fi
+"$MISE" -E "$DOTFILES_PROFILE" bootstrap
+
+# ── machine-local setup ─────────────────────────────────────────────────────
+# SSH keys and the git identity never enter the repo. ~/.ssh/config (linked)
+# expects these key names.
+header "SSH keys and signing"
+mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+host="$(scutil --get LocalHostName)"
+for key in id_ed25519 id_ed25519_mac-mini id_ed25519_pve; do
+  if [[ -f "$HOME/.ssh/$key" ]]; then
+    step "$key exists"
+  else
+    comment="$host"; [[ "$key" == id_ed25519 ]] && comment="$GIT_EMAIL"
+    log "Generating $key (enter a passphrase, or leave it empty)…"
+    ssh-keygen -t ed25519 -f "$HOME/.ssh/$key" -C "$comment"
+  fi
+done
+
+pub="$(cut -d' ' -f1,2 "$HOME/.ssh/id_ed25519.pub")"
+for type in authentication signing; do
+  if gh api "user/$([[ $type == signing ]] && echo ssh_signing_keys || echo keys)" \
+       --jq '.[].key' | grep -qxF "$pub"; then
+    step "GitHub already has id_ed25519 as a $type key"
+  else
+    gh ssh-key add "$HOME/.ssh/id_ed25519.pub" --type "$type" --title "$host"
+  fi
+done
+
+signers="$HOME/.ssh/allowed_signers"
+grep -qF "$pub" "$signers" 2>/dev/null \
+  || printf '%s %s\n' "$GIT_EMAIL" "$(cat "$HOME/.ssh/id_ed25519.pub")" >> "$signers"
+
+git_local="$HOME/.config/git/config.local"
+git config -f "$git_local" user.name       "$GIT_NAME"
+git config -f "$git_local" user.email      "$GIT_EMAIL"
+git config -f "$git_local" user.signingkey "$HOME/.ssh/id_ed25519.pub"
+ok "Signing set up"
+
+header "Code"
+for repo in "${CODE_REPOS[@]}"; do
+  dest="$HOME/Code/$repo"
+  if [[ -d "$dest/.git" ]]; then step "$repo already cloned"
+  else mkdir -p "$(dirname "$dest")" && gh repo clone "$repo" "$dest"
+  fi
+done
+
+# ── done ────────────────────────────────────────────────────────────────────
+header "Status"
+"$MISE" -E "$DOTFILES_PROFILE" bootstrap status || true
+ok "Done. Open a new terminal."
+step "Pass -E $DOTFILES_PROFILE to every later mise bootstrap command."
+step "Once Tailscale is up, from a Mac that can already reach them:"
+step "  ssh-copy-id -i ~/.ssh/id_ed25519_mac-mini.pub mac-mini   (likewise pve)"
