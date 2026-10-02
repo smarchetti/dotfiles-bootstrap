@@ -81,7 +81,7 @@ else
   clt_label="$(softwareupdate -l 2>/dev/null \
     | sed -n 's/^\* Label: \(Command Line Tools for Xcode.*\)/\1/p' | sort -V | tail -1)"
   if [[ -n "$clt_label" ]]; then
-    log "Installing $clt_label…"
+    log "Installing ${clt_label}…"
     sudo softwareupdate -i "$clt_label" || { rm -f "$clt_trigger"; die "CLT install failed"; }
     rm -f "$clt_trigger"
   else
@@ -148,7 +148,7 @@ else
   fi
   # --adopt clones into ~/.config/mise and applies config.toml. It ignores -E,
   # so the profile is a second pass below.
-  log "Adopting $DOTFILES_URL…"
+  log "Adopting ${DOTFILES_URL}…"
   "$MISE" bootstrap --adopt "$DOTFILES_URL"
 fi
 
