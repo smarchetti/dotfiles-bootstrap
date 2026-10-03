@@ -42,8 +42,7 @@ bash -c "$(curl -fsSL .../init.sh)" -- mac-mini
    `~/.config/git/config.local`.
 9. Clones `skills` and `claude-hud` into `~/Code/smarchetti`. Claude Code's config
    depends on both.
-10. Restarts the Dock, Finder and SystemUIServer so the macOS defaults take effect,
-    and prints `mise bootstrap status`.
+10. Prints `mise bootstrap status`.
 
 Every step checks before acting, so rerunning after a failure picks up where it left
 off. The one thing left to do afterwards is to install the `mac-mini` and `pve` public

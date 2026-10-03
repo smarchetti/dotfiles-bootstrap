@@ -223,11 +223,6 @@ for repo in "${CODE_REPOS[@]}"; do
 done
 
 # ── done ────────────────────────────────────────────────────────────────────
-# mise writes macOS defaults but never restarts the apps that read them; it only
-# prints a killall reminder. Restart them so the Dock, Finder and screenshot
-# settings take effect now.
-killall Dock Finder SystemUIServer 2>/dev/null || true
-
 header "Status"
 "$MISE" -E "$DOTFILES_PROFILE" bootstrap status || true
 ok "Done. Open a new terminal."
