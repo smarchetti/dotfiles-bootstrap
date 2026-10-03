@@ -113,6 +113,12 @@ if [[ "$(printf '%s\n%s\n' "$MIN_MISE" "$mise_version" | sort -V | head -1)" != 
 fi
 ok "$("$MISE" --version | awk '{print $1}')"
 
+# mise runs bootstrap hooks with this shell's PATH and adds none of its tools, so
+# put the shims and Homebrew on it now, as zprofile will in later shells. Without
+# them the post-tools hooks miss node (pi), go, skills and jq. Neither directory
+# needs to exist yet; bootstrap creates both.
+export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
+
 # ── GitHub ──────────────────────────────────────────────────────────────────
 # Device-code flow: gh prints a one-time code; open the URL on any device and
 # enter it. The ssh-key scopes are requested now so step 7 needs no second login.
