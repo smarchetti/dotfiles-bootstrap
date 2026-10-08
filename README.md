@@ -33,10 +33,10 @@ bash -c "$(curl -fsSL .../init.sh)" -- mac-mini
 4. Logs in to GitHub with the device-code flow: open the URL on any device and enter
    the code. It also requests the ssh-key scopes that step 8 needs.
 5. Runs `mise bootstrap --adopt`, which clones the dotfiles into `~/.config/mise`,
-   installs Homebrew and the shared packages and tools, and links the dotfiles.
+   installs the packages and tools shared with the Linux VM, and links the dotfiles.
 6. If the profile has App Store apps, opens the App Store and waits for you to sign in.
-7. Runs `mise -E <profile> bootstrap` for the machine's own apps. `--adopt` ignores `-E`,
-   so this is a second pass.
+7. Runs `mise -E macos,<profile> bootstrap` for Homebrew, the Mac-only packages and
+   defaults, and the machine's own apps. `--adopt` ignores `-E`, so this is a second pass.
 8. Creates the SSH keys `~/.ssh/config` expects, adds `id_ed25519` to GitHub as an
    authentication and a signing key, and writes `allowed_signers` and
    `~/.config/git/config.local`.

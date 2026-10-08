@@ -152,8 +152,8 @@ else
     mv "$gh_config" "$gh_backup"
     step "Saved GitHub CLI preferences to $gh_backup"
   fi
-  # --adopt clones into ~/.config/mise and applies config.toml. It ignores -E,
-  # so the profile is a second pass below.
+  # --adopt clones into ~/.config/mise and applies config.toml, the part shared with
+  # the Linux VM. It ignores -E, so the Mac config and the profile are a second pass below.
   log "Adopting ${DOTFILES_URL}…"
   "$MISE" bootstrap --adopt "$DOTFILES_URL"
 fi
@@ -176,7 +176,7 @@ if grep -q '^[^#]*"mas:' "$MISE_DIR/config.$DOTFILES_PROFILE.toml"; then
   open -a "App Store" || true
   pause "Sign in to the App Store (skip if already signed in)."
 fi
-"$MISE" -E "$DOTFILES_PROFILE" bootstrap
+"$MISE" -E "macos,$DOTFILES_PROFILE" bootstrap
 
 # ── machine-local setup ─────────────────────────────────────────────────────
 # SSH keys and the git identity never enter the repo. ~/.ssh/config (linked)
@@ -224,8 +224,8 @@ done
 
 # ── done ────────────────────────────────────────────────────────────────────
 header "Status"
-"$MISE" -E "$DOTFILES_PROFILE" bootstrap status || true
+"$MISE" -E "macos,$DOTFILES_PROFILE" bootstrap status || true
 ok "Done. Open a new terminal."
-step "Pass -E $DOTFILES_PROFILE to every later mise bootstrap command."
+step "Pass -E macos,$DOTFILES_PROFILE to every later mise bootstrap command."
 step "Once Tailscale is up, from a Mac that can already reach them:"
 step "  ssh-copy-id -i ~/.ssh/id_ed25519_mac-mini.pub mac-mini   (likewise pve)"
